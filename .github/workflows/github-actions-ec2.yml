@@ -1,0 +1,84 @@
+name: Deployment to EC2
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v2
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v2
+        with:
+          node-version: 20
+
+      - name: Install pnpm
+        run: npm install -g pnpm
+
+      - name: Install dependencies
+        run: pnpm install
+
+      - name: Build Docker image
+        run: docker build -t sgroup-devops .
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+
+      - name: Push to ECR
+        run: |
+          docker tag sgroup-devops:latest 415684988387.dkr.ecr.us-east-1.amazonaws.com/devops-group:latest
+          docker push 415684988387.dkr.ecr.us-east-1.amazonaws.com/devops-group:latest
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v2
+
+      - name: Create temporary directory
+        run: mkdir -p ~/.ssh
+
+      - name: Setup SSH
+        run: echo "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/sgrdevops.pem && chmod 600 ~/.ssh/sgrdevops.pem
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+      - name: SSH to EC2 and deploy
+        uses: appleboy/ssh-action@v0.1.6
+        with:
+          host: ${{ secrets.HOST_DNS }}
+          username: ubuntu
+          key: ${{ secrets.EC2_SSH_KEY}}
+          script: |
+            aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 415684988387.dkr.ecr.us-east-1.amazonaws.com
+            docker pull 415684988387.dkr.ecr.us-east-1.amazonaws.com/devops-sgr:latest
+            docker stop sgroup-devops-container || true
+            docker rm sgroup-devops-container || true
+            docker run -d --name sgroup-devops-container -p 3000:3000 \
+              -e DATABASE_URL="mongodb+srv://quockhanhlanglim:2mIzbs8X73NJRY9g@cluster0.ri78o42.mongodb.net/sgroup?retryWrites=true&w=majority" \
+              415684988387.dkr.ecr.us-east-1.amazonaws.com/devops-sgr:latest
+
+
+
+      - name: Clean up SSH key file
+        if: always()
+        run: rm -f ~/.ssh/key.pem
